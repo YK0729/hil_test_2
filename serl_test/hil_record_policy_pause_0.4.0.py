@@ -97,11 +97,11 @@ from lerobot.processor.rename_processor import rename_stats
 from lerobot.robots import (  # noqa: F401
     Robot,
     RobotConfig,
-    bi_so100_follower,
+    #bi_so100_follower,
     hope_jr,
     koch_follower,
     make_robot_from_config,
-    so100_follower,
+    #so100_follower,
     so101_follower,
 )
 from lerobot.teleoperators import (  # noqa: F401
