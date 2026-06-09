@@ -35,25 +35,32 @@ lerobot-teleoperate \
 --robot.type=so101_follower \
 --robot.port=/dev/ttyACM0 \
 --robot.id=my_follower \
---robot.cameras="{ front: {type: opencv, index_or_path: 0, width: 640, height: 480, fps: 30, fourcc: MJPG}, side: {type: opencv, index_or_path: 2, width: 640, height: 480, fps: 30, fourcc: MJPG}, gripper: {type: opencv, index_or_path: 8, width: 640, height: 480, fps: 30, fourcc: MJPG}}" \
+--robot.cameras="{ front: {type: opencv, index_or_path: 8, width: 640, height: 480, fps: 30, fourcc: MJPG}, side: {type: opencv, index_or_path: 0, width: 640, height: 480, fps: 30, fourcc: MJPG}, gripper: {type: opencv, index_or_path: 6, width: 640, height: 480, fps: 30, fourcc: MJPG}}" \
 --teleop.type=so101_leader \
 --teleop.port=/dev/ttyACM1 \
 --teleop.id=my_leader \
 --display_data=true
 
 
+
+
+
+
+
+
+
 ##テレオペ（録画あり）
 lerobot-record \
   --robot.type=so101_follower \
-  --robot.port=/dev/ttyACM1 \
-  --robot.id=so101_follower \
-  --robot.cameras="{ front: {type: opencv, index_or_path: 6, width: 640, height: 480, fps: 30},  side: {type: opencv, index_or_path: 4, width: 640, height: 480, fps: 30},}" \
+  --robot.port=/dev/ttyACM0 \
+  --robot.id=my_follower \
+ --robot.cameras="{ front: {type: opencv, index_or_path: 8, width: 640, height: 480, fps: 30, fourcc: MJPG}, side: {type: opencv, index_or_path: 0, width: 640, height: 480, fps: 30, fourcc: MJPG}, gripper: {type: opencv, index_or_path: 6, width: 640, height: 480, fps: 30, fourcc: MJPG}}" \
   --teleop.type=so101_leader \
-  --teleop.port=/dev/ttyACM0 \
-  --teleop.id=so101_leader \
-  --dataset.repo_id=local/pick_bin_and_place_01 \
-  --dataset.single_task="pick a bin and place it in circle" \
-  --dataset.num_episodes=20 \
+  --teleop.port=/dev/ttyACM1 \
+  --teleop.id=my_leader \
+  --dataset.repo_id=local/20260609_pick_bin_and_place_v043_00 \
+  --dataset.single_task="pick a white object and place it in circle" \
+  --dataset.num_episodes=25 \
   --dataset.episode_time_s=60 \
   --dataset.reset_time_s=15 \
   --dataset.push_to_hub=False
@@ -61,52 +68,56 @@ lerobot-record \
 #結果の再生
 lerobot-replay \
 --robot.type=so101_follower \
---robot.port=/dev/ttyACM1 \
---robot.id=so101_follower \
---dataset.repo_id=local/pick_bin_and_place_01 \
---dataset.episode=0
+--robot.port=/dev/ttyACM0 \
+--robot.id=my_follower \
+--dataset.repo_id=local/20260609_pick_bin_and_place_v043_00 \
+--dataset.episode=0 \
+--display_data=true
 
 #学習
 lerobot-train \
-  --dataset.repo_id=local/pick_bin_and_place_01 \
+  --dataset.repo_id=local/20260609_pick_bin_and_place_v043_00 \
   --policy.type=act \
-  --policy.repo_id=local/act_pick_bin_and_place_01 \
-  --output_dir=outputs/train/act_pick_bin_and_place_01 \
-  --job_name=act_pick_bin_and_place_01 \
+  --policy.repo_id=local/20260609_act_pick_bin_and_place_v043_round00 \
+  --output_dir=outputs/train/20260609_act_pick_bin_and_place_v043_round00 \
+  --job_name=20260609_act_pick_bin_and_place_v043_round00 \
   --policy.device=cuda \
   --wandb.enable=false \
-  --training.steps=10000 \
-  --dataset.push_to_hub=false
-
+  --steps=20000 \
+  --save_checkpoint=true \
+  --save_freq=5000 
 
 #推論
 lerobot-record \
   --robot.type=so101_follower \
-  --robot.port=/dev/ttyACM1 \
-  --robot.id=so101_follower \
-  --robot.cameras="{ front: {type: opencv, index_or_path: 6, width: 640, height: 480, fps: 30}, side: {type: opencv, index_or_path: 4, width: 640, height: 480, fps: 30} }" \
-  --policy.path=outputs/train/act_pick_bin_and_place_01/checkpoints/last/pretrained_model \
+  --robot.port=/dev/ttyACM0 \
+  --robot.id=my_follower \
+  --teleop.type=so101_leader \
+  --teleop.port=/dev/ttyACM1 \
+  --teleop.id=my_leader \
+  --robot.cameras="{ front: {type: opencv, index_or_path: 8, width: 640, height: 480, fps: 30, fourcc: MJPG}, side: {type: opencv, index_or_path: 0, width: 640, height: 480, fps: 30, fourcc: MJPG}, gripper: {type: opencv, index_or_path: 6, width: 640, height: 480, fps: 30, fourcc: MJPG}}" \
+  --policy.path=outputs/train/20260609_act_pick_bin_and_place_v043_round00/checkpoints/last/pretrained_model \
   --policy.device=cuda \
-  --dataset.repo_id=local/eval_act_pick_bin_and_place_01 \
-  --dataset.single_task="eval pick bin and place" \
+  --dataset.repo_id=local/eval_20260609_pick_bin_and_place_v043_round00_1 \
+  --dataset.single_task="pick a white object and place it in circle" \
   --dataset.num_episodes=5 \
   --dataset.episode_time_s=60 \
   --dataset.reset_time_s=15 \
   --dataset.push_to_hub=false
 
 
-##human-in-the-loop型の推論
+
 python serl_test/hil_record_policy_pause_0.4.3.py \
   --robot.type=so101_follower \
   --robot.port=/dev/ttyACM0 \
   --robot.id=my_follower \
-  --robot.cameras="{ front: {type: opencv, index_or_path: 6, width: 640, height: 480, fps: 30}, side: {type: opencv, index_or_path: 4, width: 640, height: 480, fps: 30} }" \
+  --robot.cameras="{ front: {type: opencv, index_or_path: 8, width: 640, height: 480, fps: 30, fourcc: MJPG}, side: {type: opencv, index_or_path: 0, width: 640, height: 480, fps: 30, fourcc: MJPG}, gripper: {type: opencv, index_or_path: 6, width: 640, height: 480, fps: 30, fourcc: MJPG}}" \
   --teleop.type=so101_leader \
   --teleop.port=/dev/ttyACM1 \
   --teleop.id=my_leader \
-  --policy.path=outputs/train/act_pick_bin_and_place_01/checkpoints/last/pretrained_model \
-  --dataset.repo_id=local/eval_hil_043_test_01 \
-  --dataset.single_task="pick a bin and place it in circle" \
+  --policy.path=outputs/train/20260609_act_pick_bin_and_place_v043_round00/checkpoints/last/pretrained_model \
+  --dataset.repo_id=local/eval_hil_act_043_test_00 \
+  --dataset.single_task="pick a white object and place it in circle" \
   --dataset.num_episodes=1 \
   --dataset.episode_time_s=60 \
   --dataset.reset_time_s=10 \
