@@ -150,6 +150,11 @@ class ControlMode(Enum):
     TELEOP_INTERVENTION = auto()
     PAUSED_AFTER_INTERVENTION = auto()
 
+class EpisodeDecision(Enum):
+    SAVE = auto()
+    DISCARD = auto()
+    QUIT = auto()
+
 
 class NonBlockingKeyboard:
     """Non-blocking single-key reader for Linux terminal."""
@@ -215,7 +220,8 @@ class RelativeLeaderActionMapper:
             target[key] = float(self.follower_ref[key]) + leader_delta
 
         return target
-        
+
+#leaderとfollowerの状態差分を計算する関数
 def compute_leader_follower_diffs(
     leader_action: dict[str, float],
     follower_ref: dict[str, float],
@@ -243,7 +249,7 @@ def compute_leader_follower_diffs(
     max_abs_diff = max(abs_diffs_for_check) if abs_diffs_for_check else float("inf")
     return diffs, max_abs_diff
 
-
+#leaderとfollowerの位置合わせ用関数
 def render_leader_follower_alignment(
     teleop,
     follower_ref: dict[str, float],
@@ -341,6 +347,196 @@ def clear_terminal_block(previous_num_lines: int) -> int:
         sys.stdout.flush()
 
     return 0
+
+def get_episode_buffer_num_frames(dataset: LeRobotDataset) -> int:
+    """Return number of frames currently stored in the episode buffer."""
+    if dataset is None:
+        return 0
+
+    for key in ("action", "timestamp", "frame_index"):
+        if key in dataset.episode_buffer:
+            value = dataset.episode_buffer[key]
+            if hasattr(value, "__len__"):
+                return len(value)
+
+    # Fallback: find the first list-like field
+    for value in dataset.episode_buffer.values():
+        if hasattr(value, "__len__"):
+            return len(value)
+
+    return 0
+
+
+### エピソード完了時に初期姿勢に戻す関数群
+#初期位置のロボット姿勢を取得する関数
+def observation_to_action_like(
+    obs: RobotObservation,
+    motor_names: list[str],
+) -> RobotAction:
+    """Convert robot observation into action-like joint position dict."""
+    action = {}
+
+    for name in motor_names:
+        action_key = f"{name}.pos"
+
+        if action_key in obs:
+            action[action_key] = float(obs[action_key])
+            continue
+
+        obs_key = f"observation.{name}.pos"
+        if obs_key in obs:
+            action[action_key] = float(obs[obs_key])
+            continue
+
+    if len(action) == 0:
+        raise RuntimeError(
+            "Could not build action-like joint dict from observation. "
+            f"Available keys: {list(obs.keys())}"
+        )
+
+    return action
+
+#現在位置から初期位置までの姿勢を補完する関数
+def interpolate_action(
+    start: RobotAction,
+    target: RobotAction,
+    alpha: float,
+    ignore_keys: set[str] | None = None,
+) -> RobotAction:
+    ignore_keys = ignore_keys or set()
+    out = {}
+
+    for key, target_value in target.items():
+        if key in ignore_keys:
+            continue
+        if key not in start:
+            continue
+
+        s = float(start[key])
+        t = float(target_value)
+        out[key] = s + alpha * (t - s)
+
+    return out
+
+#ロボットを初期位置に戻す関数
+def move_robot_to_initial_position(
+    robot: Robot,
+    initial_action: RobotAction,
+    robot_action_processor: RobotProcessorPipeline[
+        tuple[RobotAction, RobotObservation], RobotAction
+    ],
+    fps: int,
+    duration_s: float = 15.0,
+    hold_s: float = 0.5,
+) -> None:
+    """Move follower robot slowly back to the initial joint position."""
+    print("[INFO] Moving robot to initial position slowly...")
+
+    motor_names = list(robot.bus.motors.keys())
+
+    start_obs = robot.get_observation()
+    start_action = observation_to_action_like(start_obs, motor_names)
+
+    start_t = time.perf_counter()
+
+    while True:
+        loop_t = time.perf_counter()
+        elapsed = time.perf_counter() - start_t
+
+        alpha = min(elapsed / duration_s, 1.0)
+
+        target_action = interpolate_action(
+            start=start_action,
+            target=initial_action,
+            alpha=alpha,
+            ignore_keys={"gripper.pos"},
+        )
+
+        obs = robot.get_observation()
+        robot_action_to_send = robot_action_processor((target_action, obs))
+        robot.send_action(robot_action_to_send)
+
+        if alpha >= 1.0:
+            break
+
+        dt_s = time.perf_counter() - loop_t
+        precise_sleep(max(1 / fps - dt_s, 0.0))
+
+    hold_start_t = time.perf_counter()
+    while time.perf_counter() - hold_start_t < hold_s:
+        loop_t = time.perf_counter()
+        obs = robot.get_observation()
+
+        robot_action_to_send = robot_action_processor((initial_action, obs))
+        robot.send_action(robot_action_to_send)
+
+        dt_s = time.perf_counter() - loop_t
+        precise_sleep(max(1 / fps - dt_s, 0.0))
+
+    print("[INFO] Robot reset to initial position.")
+
+###データ保存関連関数群
+#環境リセット用関数
+def wait_environment_reset(
+    reset_time_s: float,
+    events: dict,
+    fps: int,
+) -> None:
+    print("")
+    print(f"[Environment reset] {reset_time_s:.1f} sec")
+    print("  Reset object / target position.")
+    print("  Press right arrow to skip reset wait.")
+    print("  Press q / Esc depending on listener behavior to stop recording.")
+
+    events["exit_early"] = False
+    start_t = time.perf_counter()
+
+    while time.perf_counter() - start_t < reset_time_s:
+        loop_t = time.perf_counter()
+
+        if events.get("stop_recording", False):
+            break
+
+        if events.get("exit_early", False):
+            events["exit_early"] = False
+            break
+
+        dt_s = time.perf_counter() - loop_t
+        precise_sleep(max(1 / fps - dt_s, 0.0))
+
+#保存判断を促す関数
+def wait_episode_decision(
+    events: dict,
+    fps: int,
+) -> EpisodeDecision:
+    """Wait for explicit save/discard decision after an episode."""
+    print("")
+    print("[Episode review]")
+    print("  Right arrow: SAVE this HIL episode")
+    print("  Left arrow : DISCARD and rerecord")
+    print("  Stop key   : quit recording")
+
+    # 前phaseから残った早期終了フラグは消す
+    events["exit_early"] = False
+
+    while True:
+        loop_t = time.perf_counter()
+
+        if events.get("stop_recording", False):
+            return EpisodeDecision.QUIT
+
+        if events.get("rerecord_episode", False):
+            return EpisodeDecision.DISCARD
+
+        # 公式listenerで右矢印が exit_early=True だけを立てる場合、
+        # review phaseではこれを SAVE と解釈する。
+        if events.get("exit_early", False):
+            events["exit_early"] = False
+            return EpisodeDecision.SAVE
+
+        dt_s = time.perf_counter() - loop_t
+        precise_sleep(max(1 / fps - dt_s, 0.0))
+
 
 @dataclass
 class DatasetRecordConfig:
@@ -486,15 +682,22 @@ def record_loop(
     if dataset is not None and dataset.fps != fps:
         raise ValueError(f"The dataset fps should be equal to requested fps ({dataset.fps} != {fps}).")
 
-    if policy is None:
-        raise ValueError("This HIL prototype currently expects a policy.")
+    is_hil_recording_phase = dataset is not None
 
-    if preprocessor is None or postprocessor is None:
-        raise ValueError("This HIL prototype requires policy preprocessor and postprocessor.")
+    if is_hil_recording_phase and policy is None:
+        raise ValueError("HIL recording phase expects a policy.")
 
-    policy.reset()
-    preprocessor.reset()
-    postprocessor.reset()
+    if is_hil_recording_phase and (preprocessor is None or postprocessor is None):
+        raise ValueError("HIL recording phase requires policy preprocessor and postprocessor.")
+
+    if policy is not None:
+        policy.reset()
+
+    if preprocessor is not None:
+        preprocessor.reset()
+
+    if postprocessor is not None:
+        postprocessor.reset()
 
     mode = ControlMode.POLICY
     relative_mapper = RelativeLeaderActionMapper(gripper_mode="absolute")
@@ -620,6 +823,12 @@ def record_loop(
                     guide_text,
                     previous_num_lines=alignment_render_lines,
                 )
+
+            if policy is None and dataset is None:
+                dt_s = time.perf_counter() - start_loop_t
+                precise_sleep(max(1 / fps - dt_s, 0.0))
+                timestamp = time.perf_counter() - start_episode_t
+                continue
 
             obs = robot.get_observation()
             obs_processed = robot_observation_processor(obs)
@@ -797,6 +1006,12 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
         robot.connect()
         if teleop is not None:
             teleop.connect()
+        
+        #初期位置の取得
+        motor_names = list(robot.bus.motors.keys())
+        initial_obs = robot.get_observation()
+        initial_action = observation_to_action_like(initial_obs, motor_names)
+        print("[INFO] Captured initial robot position.")
 
         listener, events = init_keyboard_listener()
 
@@ -822,39 +1037,77 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                     display_compressed_images=display_compressed_images,
                 )
 
-                # Execute a few seconds without recording to give time to manually reset the environment
-                # Skip reset for the last episode to be recorded
-                if not events["stop_recording"] and (
-                    (recorded_episodes < cfg.dataset.num_episodes - 1) or events["rerecord_episode"]
-                ):
-                    log_say("Reset the environment", cfg.play_sounds)
+                if events["stop_recording"]:
+                    break
 
-                    # reset g1 robot
-                    if robot.name == "unitree_g1":
-                        robot.reset()
+                # 1. Move follower robot back to the initial position.
+                #    This is done after every policy/HIL rollout, regardless of
+                #    whether the episode will later be saved or discarded.
+                log_say("Move robot to initial position", cfg.play_sounds)
+                move_robot_to_initial_position(
+                    robot=robot,
+                    initial_action=initial_action,
+                    robot_action_processor=robot_action_processor,
+                    fps=cfg.dataset.fps,
+                    duration_s=2.0,
+                    hold_s=0.5,
+                )
 
-                    record_loop(
-                        robot=robot,
-                        events=events,
-                        fps=cfg.dataset.fps,
-                        teleop_action_processor=teleop_action_processor,
-                        robot_action_processor=robot_action_processor,
-                        robot_observation_processor=robot_observation_processor,
-                        teleop=teleop,
-                        control_time_s=cfg.dataset.reset_time_s,
-                        single_task=cfg.dataset.single_task,
-                        display_data=cfg.display_data,
-                    )
+                if events["stop_recording"]:
+                    break
 
-                if events["rerecord_episode"]:
-                    log_say("Re-record episode", cfg.play_sounds)
+                # 2. Give the operator time to reset the environment.
+                #    Object / target positions should be reset here.
+                log_say("Reset the environment", cfg.play_sounds)
+
+                if robot.name == "unitree_g1":
+                    robot.reset()
+
+                wait_environment_reset(
+                    reset_time_s=cfg.dataset.reset_time_s,
+                    events=events,
+                    fps=cfg.dataset.fps,
+                )
+
+                if events["stop_recording"]:
+                    break
+
+                # 3. Explicit episode review phase.
+                #    Right arrow: save
+                #    Left arrow : discard and rerecord
+                decision = wait_episode_decision(
+                    events=events,
+                    fps=cfg.dataset.fps,
+                )
+
+                if decision == EpisodeDecision.QUIT:
+                    break
+
+                if decision == EpisodeDecision.DISCARD:
+                    log_say("Discard episode and re-record", cfg.play_sounds)
                     events["rerecord_episode"] = False
                     events["exit_early"] = False
                     dataset.clear_episode_buffer()
                     continue
 
+                # 4. Save only if the episode actually contains HIL intervention frames.
+                n_frames = get_episode_buffer_num_frames(dataset)
+
+                if n_frames == 0:
+                    log_say(
+                        "Skip empty HIL episode: no intervention frames recorded.",
+                        cfg.play_sounds,
+                    )
+                    events["exit_early"] = False
+                    events["rerecord_episode"] = False
+                    dataset.clear_episode_buffer()
+                    continue
+
                 dataset.save_episode()
                 recorded_episodes += 1
+
+                events["exit_early"] = False
+                events["rerecord_episode"] = False
     finally:
         log_say("Stop recording", cfg.play_sounds, blocking=True)
 
