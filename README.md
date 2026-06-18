@@ -122,5 +122,15 @@ python serl_test/hil_record_policy_pause_0.4.3.py \
   --dataset.episode_time_s=60 \
   --dataset.reset_time_s=10 \
   --dataset.push_to_hub=false \
-  --display_data=false \
-  --dataset.vcodec=h264
+  --display_data=false 
+  
+  
+python serl_test/replay_motor_log_viewer.py \
+  --repo_id=local/motor_log_save_test \
+  --episode_index=2 \
+  --motor_status Present_Current \
+  --real_time \
+  --no_action \
+  --no_state \
+  --session_name=motor_only_viewer
+
